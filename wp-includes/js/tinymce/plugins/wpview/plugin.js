@@ -1,191 +1,208 @@
-/* global tinymce */
 /**
  * WordPress View plugin.
  */
+( function( tinymce, wp ) {
+	tinymce.PluginManager.add( 'wpview', function( editor ) {
+		function noop () {}
 
-(function() {
-	var VK = tinymce.VK,
-		TreeWalker = tinymce.dom.TreeWalker,
-		selected;
-
-	tinymce.create('tinymce.plugins.wpView', {
-		init : function( editor ) {
-			var wpView = this;
-
-			// Check if the `wp.mce` API exists.
-			if ( typeof wp === 'undefined' || ! wp.mce ) {
-				return;
-			}
-
-			editor.on( 'PreInit', function() {
-				// Add elements so we can set `contenteditable` to false.
-				editor.schema.addValidElements('div[*],span[*]');
-			});
-
-			// When the editor's content changes, scan the new content for
-			// matching view patterns, and transform the matches into
-			// view wrappers. Since the editor's DOM is outdated at this point,
-			// we'll wait to render the views.
-			editor.on( 'BeforeSetContent', function( e ) {
-				if ( ! e.content ) {
-					return;
-				}
-
-				e.content = wp.mce.view.toViews( e.content );
-			});
-
-			// When the editor's content has been updated and the DOM has been
-			// processed, render the views in the document.
-			editor.on( 'SetContent', function() {
-				wp.mce.view.render( editor.getDoc() );
-			});
-
-			editor.on( 'init', function() {
-				var selection = editor.selection;
-				// When a view is selected, ensure content that is being pasted
-				// or inserted is added to a text node (instead of the view).
-				editor.on( 'BeforeSetContent', function() {
-					var walker, target,
-						view = wpView.getParentView( selection.getNode() );
-
-					// If the selection is not within a view, bail.
-					if ( ! view ) {
-						return;
-					}
-
-					// If there are no additional nodes or the next node is a
-					// view, create a text node after the current view.
-					if ( ! view.nextSibling || wpView.isView( view.nextSibling ) ) {
-						target = editor.getDoc().createTextNode('');
-						editor.dom.insertAfter( target, view );
-
-					// Otherwise, find the next text node.
-					} else {
-						walker = new TreeWalker( view.nextSibling, view.nextSibling );
-						target = walker.next();
-					}
-
-					// Select the `target` text node.
-					selection.select( target );
-					selection.collapse( true );
-				});
-
-				// When the selection's content changes, scan any new content
-				// for matching views and immediately render them.
-				//
-				// Runs on paste and on inserting nodes/html.
-				editor.on( 'SetContent', function( e ) {
-					if ( ! e.context ) {
-						return;
-					}
-
-					var node = selection.getNode();
-
-					if ( ! node.innerHTML ) {
-						return;
-					}
-
-					node.innerHTML = wp.mce.view.toViews( node.innerHTML );
-					wp.mce.view.render( node );
-				});
-			});
-
-			// When the editor's contents are being accessed as a string,
-			// transform any views back to their text representations.
-			editor.on( 'PostProcess', function( e ) {
-				if ( ( ! e.get && ! e.save ) || ! e.content ) {
-					return;
-				}
-
-				e.content = wp.mce.view.toText( e.content );
-			});
-
-			// Triggers when the selection is changed.
-			// Add the event handler to the top of the stack.
-			editor.on( 'NodeChange', function( e ) {
-				var view = wpView.getParentView( e.element );
-
-				// Update the selected view.
-				if ( view ) {
-					wpView.select( view );
-
-					// Prevent the selection from propagating to other plugins.
-					return false;
-
-				// If we've clicked off of the selected view, deselect it.
-				} else {
-					wpView.deselect();
-				}
-			});
-
-			editor.on( 'keydown', function( event ) {
-				var keyCode = event.keyCode,
-					view, instance;
-
-				// If a view isn't selected, let the event go on its merry way.
-				if ( ! selected ) {
-					return;
-				}
-
-				// If the caret is not within the selected view, deselect the
-				// view and bail.
-				view = wpView.getParentView( editor.selection.getNode() );
-				if ( view !== selected ) {
-					wpView.deselect();
-					return;
-				}
-
-				// If delete or backspace is pressed, delete the view.
-				if ( keyCode === VK.DELETE || keyCode === VK.BACKSPACE ) {
-					if ( (instance = wp.mce.view.instance( selected )) ) {
-						instance.remove();
-						wpView.deselect();
-					}
-				}
-
-				// Let keypresses that involve the command or control keys through.
-				// Also, let any of the F# keys through.
-				if ( event.metaKey || event.ctrlKey || ( keyCode >= 112 && keyCode <= 123 ) ) {
-					return;
-				}
-
-				event.preventDefault();
-			});
-		},
-
-		getParentView : function( node ) {
-			while ( node ) {
-				if ( this.isView( node ) ) {
-					return node;
-				}
-
-				node = node.parentNode;
-			}
-		},
-
-		isView : function( node ) {
-			return (/(?:^|\s)wp-view-wrap(?:\s|$)/).test( node.className );
-		},
-
-		select : function( view ) {
-			if ( view === selected ) {
-				return;
-			}
-
-			this.deselect();
-			selected = view;
-			wp.mce.view.select( selected );
-		},
-
-		deselect : function() {
-			if ( selected ) {
-				wp.mce.view.deselect( selected );
-			}
-
-			selected = null;
+		if ( ! wp || ! wp.mce || ! wp.mce.views ) {
+			return {
+				getView: noop
+			};
 		}
-	});
 
-	// Register plugin
-	tinymce.PluginManager.add( 'wpview', tinymce.plugins.wpView );
-})();
+		// Check if a node is a view or not.
+		function isView( node ) {
+			return editor.dom.hasClass( node, 'wpview' );
+		}
+
+		// Replace view tags with their text.
+		function resetViews( content ) {
+			function callback( match, $1 ) {
+				return '<p>' + window.decodeURIComponent( $1 ) + '</p>';
+			}
+
+			if ( ! content ) {
+				return content;
+			}
+
+			return content
+				.replace( /<div[^>]+data-wpview-text="([^"]+)"[^>]*>(?:\.|[\s\S]+?wpview-end[^>]+>\s*<\/span>\s*)?<\/div>/g, callback )
+				.replace( /<p[^>]+data-wpview-marker="([^"]+)"[^>]*>[\s\S]*?<\/p>/g, callback );
+		}
+
+		editor.on( 'init', function() {
+			var MutationObserver = window.MutationObserver || window.WebKitMutationObserver;
+
+			if ( MutationObserver ) {
+				new MutationObserver( function() {
+					editor.fire( 'wp-body-class-change' );
+				} )
+				.observe( editor.getBody(), {
+					attributes: true,
+					attributeFilter: ['class']
+				} );
+			}
+
+			// Pass on body class name changes from the editor to the wpView iframes.
+			editor.on( 'wp-body-class-change', function() {
+				var className = editor.getBody().className;
+
+				editor.$( 'iframe[class="wpview-sandbox"]' ).each( function( i, iframe ) {
+					// Make sure it is a local iframe
+					// jshint scripturl: true
+					if ( ! iframe.src || iframe.src === 'javascript:""' ) {
+						try {
+							iframe.contentWindow.document.body.className = className;
+						} catch( er ) {}
+					}
+				});
+			} );
+		});
+
+		// Scan new content for matching view patterns and replace them with markers.
+		editor.on( 'beforesetcontent', function( event ) {
+			var node;
+
+			if ( ! event.selection ) {
+				wp.mce.views.unbind();
+			}
+
+			if ( ! event.content ) {
+				return;
+			}
+
+			if ( ! event.load ) {
+				node = editor.selection.getNode();
+
+				if ( node && node !== editor.getBody() && /^\s*https?:\/\/\S+\s*$/i.test( event.content ) ) {
+					// When a url is pasted or inserted, only try to embed it when it is in an empty paragrapgh.
+					node = editor.dom.getParent( node, 'p' );
+
+					if ( node && /^[\s\uFEFF\u00A0]*$/.test( editor.$( node ).text() || '' ) ) {
+						// Make sure there are no empty inline elements in the <p>
+						node.innerHTML = '';
+					} else {
+						return;
+					}
+				}
+			}
+
+			event.content = wp.mce.views.setMarkers( event.content );
+		} );
+
+		// Replace any new markers nodes with views.
+		editor.on( 'setcontent', function( event ) {
+			if ( event.load && ! event.initial && editor.quirks.refreshContentEditable ) {
+				// Make sure there is a selection in Gecko browsers.
+				// Or it will refresh the content internally which resets the iframes.
+				editor.quirks.refreshContentEditable();
+			}
+
+			wp.mce.views.render();
+		} );
+
+		// Empty view nodes for easier processing.
+		editor.on( 'preprocess hide', function( event ) {
+			editor.$( 'div[data-wpview-text], p[data-wpview-marker]', event.node ).each( function( i, node ) {
+				node.innerHTML = '.';
+			} );
+		}, true );
+
+		// Replace views with their text.
+		editor.on( 'postprocess', function( event ) {
+			event.content = resetViews( event.content );
+		} );
+
+		// Replace views with their text inside undo levels.
+		// This also prevents that new levels are added when there are changes inside the views.
+		editor.on( 'beforeaddundo', function( event ) {
+			event.level.content = resetViews( event.level.content );
+		} );
+
+		// Make sure views are copied as their text.
+		editor.on( 'drop objectselected', function( event ) {
+			if ( isView( event.targetClone ) ) {
+				event.targetClone = editor.getDoc().createTextNode(
+					window.decodeURIComponent( editor.dom.getAttrib( event.targetClone, 'data-wpview-text' ) )
+				);
+			}
+		} );
+
+		// Clean up URLs for easier processing.
+		editor.on( 'pastepreprocess', function( event ) {
+			var content = event.content;
+
+			if ( content ) {
+				content = tinymce.trim( content.replace( /<[^>]+>/g, '' ) );
+
+				if ( /^https?:\/\/\S+$/i.test( content ) ) {
+					event.content = content;
+				}
+			}
+		} );
+
+		// Show the view type in the element path.
+		editor.on( 'resolvename', function( event ) {
+			if ( isView( event.target ) ) {
+				event.name = editor.dom.getAttrib( event.target, 'data-wpview-type' ) || 'object';
+			}
+		} );
+
+		// See `media` plugin.
+		editor.on( 'click keyup', function() {
+			var node = editor.selection.getNode();
+
+			if ( isView( node ) ) {
+				if ( editor.dom.getAttrib( node, 'data-mce-selected' ) ) {
+					node.setAttribute( 'data-mce-selected', '2' );
+				}
+			}
+		} );
+
+		editor.addButton( 'wp_view_edit', {
+			tooltip: 'Edit ', // trailing space is needed, used for context
+			icon: 'dashicon dashicons-edit',
+			onclick: function() {
+				var node = editor.selection.getNode();
+
+				if ( isView( node ) ) {
+					wp.mce.views.edit( editor, node );
+				}
+			}
+		} );
+
+		editor.addButton( 'wp_view_remove', {
+			tooltip: 'Remove',
+			icon: 'dashicon dashicons-no',
+			onclick: function() {
+				editor.fire( 'cut' );
+			}
+		} );
+
+		editor.once( 'preinit', function() {
+			var toolbar;
+
+			if ( editor.wp && editor.wp._createToolbar ) {
+				toolbar = editor.wp._createToolbar( [
+					'wp_view_edit',
+					'wp_view_remove'
+				] );
+
+				editor.on( 'wptoolbar', function( event ) {
+					if ( ! event.collapsed && isView( event.element ) ) {
+						event.toolbar = toolbar;
+					}
+				} );
+			}
+		} );
+
+		editor.wp = editor.wp || {};
+		editor.wp.getView = noop;
+		editor.wp.setViewCursor = noop;
+
+		return {
+			getView: noop
+		};
+	} );
+} )( window.tinymce, window.wp );
